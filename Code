@@ -1,0 +1,253 @@
+# Load required packages
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(broom.mixed)
+library(kableExtra)
+
+# Read data
+data <- read_csv("C:\\Users\\augesten\\PycharmProjects\\PythonProject\\数据集\\HHstandardized_test.csv")
+
+# Ensure dependent variable is factor
+data$label <- as.factor(data$label)
+
+# ================================
+# Univariable multilevel logistic regression
+# ================================
+
+cat("=== Univariable multilevel logistic regression results ===\n\n")
+
+univariable_results <- data.frame()
+
+run_univariable_model <- function(var_name, data) {
+  formula_str <- paste("label ~", var_name, "+ (1 | City_id)")
+  formula_obj <- as.formula(formula_str)
+  
+  model <- glmer(formula_obj, data = data, family = binomial,
+                 control = glmerControl(optimizer = "bobyqa"))
+  
+  results <- tidy(model, conf.int = TRUE, exponentiate = TRUE, effects = "fixed")
+  
+  var_result <- results %>%
+    filter(term == var_name) %>%
+    mutate(
+      variable = var_name,
+      OR = round(estimate, 3),
+      CI_low = round(conf.low, 3),
+      CI_high = round(conf.high, 3),
+      CI = paste0("[", CI_low, ", ", CI_high, "]"),
+      p_value = round(p.value, 4)
+    ) %>%
+    select(variable, OR, CI_low, CI_high, CI, p_value)
+  
+  return(var_result)
+}
+
+variables <- colnames(data)[3:(ncol(data)-1)]
+
+for (var in variables) {
+  tryCatch({
+    result <- run_univariable_model(var, data)
+    univariable_results <- bind_rows(univariable_results, result)
+    cat("Completed variable:", var, "\n")
+  }, error = function(e) {
+    cat("Variable", var, "modeling failed:", e$message, "\n")
+  })
+}
+
+cat("\n--- Univariable model summary ---\n")
+print(univariable_results)
+
+write_csv(univariable_results, "univariable_model_results.csv")
+
+if (nrow(univariable_results) > 0 && "OR" %in% names(univariable_results)) {
+  univariable_table <- univariable_results %>%
+    select(variable, OR, CI, p_value) %>%
+    mutate(OR_log = abs(log(OR))) %>%
+    arrange(desc(OR_log)) %>%
+    select(-OR_log)
+  
+  kable(univariable_table, format = "html", 
+        caption = "Table 1: Univariable multilevel logistic regression results") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = FALSE) %>%
+    cat(., file = "univariable_model_results_table.html")
+} else {
+  cat("Warning: Univariable results are empty or missing OR column\n")
+}
+
+# ================================
+# Multivariable multilevel logistic regression
+# ================================
+
+cat("\n\n=== Multivariable multilevel logistic regression results ===\n\n")
+
+multivariable_formula <- label ~ 
+  Neighborhood_twi + 
+  Neighborhood_elevation + 
+  Neighborhood_TR + 
+  Neighborhood_AP + 
+  Neighborhood_NDVI + 
+  Neighborhood_Population_density + 
+  Neighborhood_Road_density + 
+  Neighborhood_GDP +
+  
+  City_Population_density + 
+  City_Night_ligth + 
+  City_GDP + 
+  City_NDVI + 
+  (1 | City_id)
+
+cat("Fitting multivariable model...\n")
+multivariable_model <- glmer(multivariable_formula, 
+                             data = data, 
+                             family = binomial,
+                             control = glmerControl(optimizer = "bobyqa",
+                                                    optCtrl = list(maxfun = 10000)))
+
+cat("Model convergence status:", ifelse(is.null(multivariable_model@optinfo$conv$lme4$messages), 
+                                       "Converged", "Not converged"), "\n")
+
+multivariable_results <- tidy(multivariable_model, 
+                              conf.int = TRUE, 
+                              exponentiate = TRUE, 
+                              effects = "fixed")
+
+multivariable_results_clean <- multivariable_results %>%
+  mutate(
+    variable = term,
+    OR = round(estimate, 3),
+    CI_low = round(conf.low, 3),
+    CI_high = round(conf.high, 3),
+    CI = paste0("[", CI_low, ", ", CI_high, "]"),
+    p_value = round(p.value, 4),
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  ) %>%
+  select(variable, OR, CI_low, CI_high, CI, p_value, significance) %>%
+  filter(variable != "(Intercept)")
+
+cat("\n--- Multivariable model summary ---\n")
+print(multivariable_results_clean)
+
+write_csv(multivariable_results_clean, "multivariable_model_results.csv")
+
+if (nrow(multivariable_results_clean) > 0 && "OR" %in% names(multivariable_results_clean)) {
+  multivariable_table <- multivariable_results_clean %>%
+    mutate(
+      `OR (95% CI)` = paste0(OR, " ", CI, significance),
+      OR_log = abs(log(OR))
+    ) %>%
+    select(variable, `OR (95% CI)`, p_value, OR_log) %>%
+    arrange(desc(OR_log)) %>%
+    select(-OR_log)
+  
+  kable(multivariable_table, format = "html", 
+        caption = "Table 2: Multivariable multilevel logistic regression results") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = FALSE) %>%
+    cat(., file = "multivariable_model_results_table.html")
+} else {
+  cat("Warning: Multivariable results are empty or missing OR column\n")
+}
+
+# ================================
+# Model comparison
+# ================================
+
+neighborhood_gdp_uni <- univariable_results %>%
+  filter(variable == "Neighborhood_GDP")
+neighborhood_gdp_multi <- multivariable_results_clean %>%
+  filter(variable == "Neighborhood_GDP")
+city_gdp_uni <- univariable_results %>%
+  filter(variable == "City_GDP")
+city_gdp_multi <- multivariable_results_clean %>%
+  filter(variable == "City_GDP")
+
+cat("Key variable comparison:\n")
+cat("1. Neighborhood GDP:\n")
+if (nrow(neighborhood_gdp_uni) > 0) {
+  cat("   Univariable: OR =", neighborhood_gdp_uni$OR, 
+      "95% CI =", neighborhood_gdp_uni$CI, 
+      "p =", neighborhood_gdp_uni$p_value, "\n")
+}
+if (nrow(neighborhood_gdp_multi) > 0) {
+  cat("   Multivariable: OR =", neighborhood_gdp_multi$OR, 
+      "95% CI =", neighborhood_gdp_multi$CI, 
+      "p =", neighborhood_gdp_multi$p_value, "\n\n")
+}
+
+cat("2. City GDP:\n")
+if (nrow(city_gdp_uni) > 0) {
+  cat("   Univariable: OR =", city_gdp_uni$OR, 
+      "95% CI =", city_gdp_uni$CI, 
+      "p =", city_gdp_uni$p_value, "\n")
+}
+if (nrow(city_gdp_multi) > 0) {
+  cat("   Multivariable: OR =", city_gdp_multi$OR, 
+      "95% CI =", city_gdp_multi$CI, 
+      "p =", city_gdp_multi$p_value, "\n\n")
+}
+
+cat("Significance change (univariable vs multivariable):\n")
+if (nrow(univariable_results) > 0 && nrow(multivariable_results_clean) > 0) {
+  comparison_df <- full_join(
+    univariable_results %>% select(variable, OR_uni = OR, p_uni = p_value),
+    multivariable_results_clean %>% select(variable, OR_multi = OR, p_multi = p_value),
+    by = "variable"
+  ) %>%
+    mutate(
+      significance_change = case_when(
+        p_uni < 0.05 & p_multi >= 0.05 ~ "Significant -> Not significant",
+        p_uni >= 0.05 & p_multi < 0.05 ~ "Not significant -> Significant",
+        p_uni < 0.05 & p_multi < 0.05 ~ "Remain significant",
+        TRUE ~ "Remain not significant"
+      ),
+      OR_change_percent = round((OR_multi - OR_uni) / OR_uni * 100, 1)
+    )
+  
+  print(comparison_df %>% select(variable, significance_change, OR_change_percent))
+} else {
+  cat("Cannot compare variables: univariable or multivariable results are empty\n")
+}
+
+# ================================
+# Model diagnostics
+# ================================
+
+cat("\n\n=== Model diagnostics ===\n\n")
+
+cat("1. Random effects summary:\n")
+ranef_summary <- VarCorr(multivariable_model)
+print(ranef_summary)
+
+icc <- function(model) {
+  var_random <- as.data.frame(VarCorr(model))$vcov[1]
+  var_fixed <- (pi^2)/3
+  icc_value <- var_random / (var_random + var_fixed)
+  return(icc_value)
+}
+
+cat("\n2. ICC:", round(icc(multivariable_model), 3), "\n")
+
+cat("\n3. Model fit metrics:\n")
+cat("   AIC:", round(AIC(multivariable_model), 1), "\n")
+cat("   BIC:", round(BIC(multivariable_model), 1), "\n")
+
+# ================================
+# Save workspace
+# ================================
+
+save.image("analysis_workspace.RData")
+
+cat("\nAnalysis complete.\n")
+cat("Results saved to:\n")
+cat("1. univariable_model_results.csv\n")
+cat("2. multivariable_model_results.csv\n")
+cat("3. univariable_model_results_table.html\n")
+cat("4. multivariable_model_results_table.html\n")
+cat("5. analysis_workspace.RData\n")
